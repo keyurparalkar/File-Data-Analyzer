@@ -1,0 +1,259 @@
+import dash
+import dash_core_components as dcc
+import dash_html_components as html
+from dash.dependencies import Input, Output
+import numpy as np
+import pandas as pd
+import plotly.graph_objs as go
+import time
+import os
+from flask_caching import Cache
+
+external_stylesheets = ['dash.css']
+app = dash.Dash(__name__,external_stylesheets=external_stylesheets)
+CACHE_CONFIG = {
+    # try 'filesystem' if you don't want to setup redis
+    #'CACHE_TYPE': 'simple'
+    'CACHE_TYPE': 'redis',
+    'CACHE_KEY_PREFIX': 'fcache',
+    'CACHE_REDIS_HOST': 'localhost',
+    'CACHE_REDIS_PORT': '6379',
+    'CACHE_REDIS_URL': 'redis://localhost:6379'
+}
+
+cache = Cache()
+cache.init_app(app.server, config=CACHE_CONFIG)
+
+
+app.layout= html.Div(id="app",children=[
+    html.Div(children=[
+        html.Div(id='side-panel',children=[
+            html.H1(children='FDAnalyzer'),  
+            html.Div(children='''
+            A file data analyzer
+    '''),
+
+            html.P(children='X Values:'),
+        dcc.Dropdown(
+            id='x_values'
+        ),
+            html.P(children='Y Values:'),
+        dcc.Dropdown(
+            id='y_values'
+        ),
+            html.P(children='Select Plot:'),
+        dcc.Dropdown(
+            id='plot_select',
+            options=[{'label':x ,'value':y} for x,y in zip(['Scatter plot','Line graph','Bar graph'],['scatter','line','bar'])],
+            value='bar'
+        ),
+            dcc.Upload(
+                id='upload',
+                children=html.Button('Upload CSV',className='animated-button thar-one',id='upload-file-button'),
+                multiple=False,
+                max_size=30000000
+            )
+        ]),
+        html.Div('DataFrame Successfully loaded',id='upload-output-message'),
+        dcc.Loading(id='rows-loading',children=[
+            html.Div(id='rows')
+        ]),
+        dcc.Loading(id='cols-loading',children=[
+            html.Div(id='cols')
+        ])
+    ]),
+    ####################################
+    html.Div(id="plots",style={'width':'50%'},children=[
+        html.Div(id='dynamic_stats',children=[
+            dcc.Loading(id='loading-stats-1',children=[
+                html.Div(id='stat-1')
+            ]),
+            dcc.Loading(id='loading-stats-2',children=[
+                html.Div(id='stat-2')
+            ]),
+            dcc.Loading(id='loading-stats-3',children=[
+                html.Div(id='stat-3')
+            ])
+        ]),
+        html.Div(id='dynamic_graphs',children=[
+            dcc.Loading(id='loading-graph-1',style={'margin-top':'150px'},children=[
+                dcc.Graph(
+                    id='example-graph'
+                    # style={'box-shadow':'3px 3px 5px 6px #ccc'} 
+                )
+            ],type='default'),
+            dcc.Loading(id='loading-graph-2',style={'margin-top':'250px'},children=[
+                dcc.Graph(
+                    id='NaN_graph',
+                    config={
+                        'autosizable':True,
+                        'edits':dict(annotationText=True)
+                        
+                    }
+                )
+            ],type='default')
+        ]),
+        dcc.Loading(id='loading-graph-3',style={'margin-top':'350px'},children=[
+            dcc.Graph(
+                id='corr_graph'
+         )
+        ],type='default')
+    ]),
+    html.Div(id='intermediate-output',style={'display':'none'})
+
+])
+
+#function for memozing example of dash
+@cache.memoize()
+def global_store(value,corr=False):
+    if(value==None):
+        return pd.DataFrame({})
+    
+    read_data = pd.read_csv('./data/'+value)
+    
+    if(corr==False):
+        time.sleep(5)
+        return read_data
+    elif(corr==True):
+        corr_data=read_data.corr()
+        time.sleep(5)
+        return read_data,corr_data
+        
+
+#callback for rows, columns, and dropdown options update
+@app.callback([Output('x_values','options'), Output('y_values','options'),
+                Output('rows','children'), Output('cols','children')],[ Input('upload','filename')])
+def data_handler_side_panel(filename):
+    df_data = global_store(filename)
+    ops = [{'label':x, 'value':x} for x in df_data.columns]
+    return ops,ops,[html.P('Rows'),html.P(df_data.shape[0],id='rows-data')],[html.P('Columns'),html.P(df_data.shape[1],id='cols-data')]
+
+#callback for displaying mini stats:
+@app.callback([Output('stat-1','children'),Output('stat-2','children'),Output('stat-3','children')],[Input('upload','filename')])
+def update_mini_stats(filename):
+    df_data = global_store(filename)
+    return [html.P('Object Dtypes',id='stats-title'),html.P(sum(df_data.dtypes==object),id='rows-data')],[html.P('Int Dtypes',id='stats-title'),html.P(sum(df_data.dtypes==int),id='cols-data')],[html.P('Float Dtypes',id='stats-title'),html.P(sum(df_data.dtypes==float),id='cols-data')]
+
+#calback for uploading dataset and sotring it in an global variable:
+@app.callback([ Output('upload-output-message','children'), Output('intermediate-output','children')],[ Input('upload','filename')])
+def upload_csv(filename):
+    try:
+        print('IN UPLOAD COMPONENT ==== ',filename)
+        df_cached = global_store(filename)
+        if(filename == None):
+            return html.Div('Please upload a CSV file'),''
+        else:
+            return html.Div(f'File {filename} uploaded successfullly'), str(filename)    
+    except Exception as e:
+        return html.Div('Error in reading csv: '+str(e)),''
+
+
+#callback for returning figure object to Corr_graph
+@app.callback( Output('corr_graph','figure'),[ Input('upload','filename')])
+def update_corr_plot(filename):
+    if(filename !=None):
+        _,corr_data = global_store(filename,corr=True)
+        figure={
+            'data':[go.Heatmap(
+                x=corr_data.columns.tolist(),
+                y=corr_data.columns.tolist(),
+                z=corr_data[corr_data.columns.tolist()].values,
+                colorscale='balance',
+                colorbar={'title':'Percentage'},
+                showscale=True
+            )],
+            'layout':go.Layout(title="Pearson's correlation coeffcient",
+                               xaxis={'tickangle':20},
+                               yaxis={'tickangle':-20}
+            )
+        }
+    else:
+        figure = {}
+    
+
+    return figure
+    
+#callback for NaN graph plotting
+@app.callback( Output('NaN_graph','figure'),[Input('upload','filename')])
+def update_nan_plot(filename):
+    df_data = global_store(filename)
+    nan_series = df_data.isna().sum()
+    nan_series = nan_series.map(lambda x:x+np.random.randint(5)*10)
+    x_data = nan_series.index.tolist()
+    y_data = nan_series.values
+    figure1={
+        'data':[
+            {'x':x_data,'y':y_data,'type':'bar','name':'PUBG Dataset'},
+        ],
+        'layout':{
+            'title':'NaN Count Graph',
+        }
+    }
+    return figure1
+
+@app.callback(Output('example-graph','figure'), [Input('x_values','value'),Input('y_values','value'),Input('plot_select','value'),Input('upload','filename')])
+def update_dropdown_values(x,y,plot_type,filename):
+    df_parsed = global_store(filename)
+    
+    if(x!=None and y!=None):
+        #checking if x is categorical or object type
+        if (df_parsed[x].dtype == object or df_parsed[x].dtype == 'int64'):
+            unique_cats = df_parsed[x].unique()
+            unique_cats.sort()
+            
+            red_range = np.random.randint(low=0,high=225)
+            green_range = np.random.randint(low=0,high=255)
+            blue_range = np.random.randint(low=0,high=255)
+            rgb_colors = [f'rgb({x+0.1+red_range},{x + 0.1 + green_range},{x + 0.1 + blue_range})' for x in range(len(unique_cats))]
+
+            #grouping dataframe along x:
+            t1_group = df_parsed.groupby(x)
+            all_dfs = []
+            for e,k in enumerate(list(t1_group.groups.keys())):
+                all_dfs.append(pd.DataFrame({f'cat{e}':[k for x in range(len(t1_group.groups[k].tolist()))],f'val{e}':[df_parsed['weaponsAcquired'][y] for y in t1_group.groups[k]]})) 
+            print(all_dfs)
+            
+        if(plot_type ==  'line' or plot_type == 'bar'):
+            figure={
+                'data':[
+                    {'x':df_parsed[x],'y':df_parsed[y],'type':plot_type,'name':'PUBG Dataset'},
+                ],
+                'layout':{
+                    'title':'Dash board viz',
+                }
+            }
+
+        elif(plot_type=='scatter'):
+            df_parsed[x]
+            figure={
+                'data':[go.Scatter(
+                    x=df_parsed[x],
+                    y=df_parsed[y],
+                    mode='markers',
+                    marker={
+                        'size':15,
+                        'opacity': 0.5,
+                        'line':{'width':0.5,'color':'white'},
+                        'color':np.random.randn(10000),
+                        'colorscale':'Viridis'
+                    }
+                )],
+                'layout':go.Layout(
+                    xaxis={
+                        'title':x,
+                        'type':'linear'
+                    },
+                    yaxis={
+                        'title':y,
+                        'type':'linear'
+                    },
+                    showlegend=True
+                )
+            }
+    else:
+        figure={}
+            
+    return figure
+
+if __name__ == '__main__':
+    app.run_server(debug=True)
